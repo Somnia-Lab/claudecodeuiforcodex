@@ -7,6 +7,7 @@ import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMess
 import { createNormalizedMessage, generateMessageId, readObjectRecord } from '@/shared/utils.js';
 
 const PROVIDER = 'codex';
+const CODEX_IMAGE_OPEN_TAG_RE = /^<image name=(.+)>$/;
 
 type CodexHistoryResult =
   | AnyRecord[]
@@ -54,6 +55,102 @@ function extractCodexTextContent(content: unknown): string {
     })
     .filter(Boolean)
     .join('\n');
+}
+
+function isHiddenCodexUserText(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith('# AGENTS.md instructions for ')
+    || trimmed.startsWith('<environment_context>');
+}
+
+function extractCodexUserContentAndImages(content: unknown): { content: string; images: AnyRecord[] } {
+  if (!Array.isArray(content)) {
+    return {
+      content: typeof content === 'string' ? content : '',
+      images: [],
+    };
+  }
+
+  const textParts: string[] = [];
+  const images: AnyRecord[] = [];
+  let pendingImageName: string | null = null;
+
+  for (const item of content) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const record = item as AnyRecord;
+
+    if (
+      (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
+      && typeof record.text === 'string'
+    ) {
+      const text = record.text;
+      const trimmed = text.trim();
+      const imageTagMatch = trimmed.match(CODEX_IMAGE_OPEN_TAG_RE);
+
+      if (imageTagMatch) {
+        pendingImageName = imageTagMatch[1]?.trim() || null;
+        continue;
+      }
+
+      if (trimmed === '</image>') {
+        pendingImageName = null;
+        continue;
+      }
+
+      if (isHiddenCodexUserText(text)) {
+        continue;
+      }
+
+      textParts.push(text);
+      continue;
+    }
+
+    if (record.type === 'input_image' && typeof record.image_url === 'string') {
+      images.push({
+        name: pendingImageName || `Image ${images.length + 1}`,
+        data: record.image_url,
+      });
+      pendingImageName = null;
+    }
+  }
+
+  return {
+    content: textParts.filter(Boolean).join('\n').trim(),
+    images,
+  };
+}
+
+function dedupeCodexUserMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  const deduped: NormalizedMessage[] = [];
+
+  for (const message of messages) {
+    const previous = deduped[deduped.length - 1];
+    const previousImages = Array.isArray(previous?.images) ? previous.images.length : 0;
+    const currentImages = Array.isArray(message.images) ? message.images.length : 0;
+    const previousTime = previous ? new Date(previous.timestamp).getTime() : 0;
+    const currentTime = new Date(message.timestamp).getTime();
+
+    if (
+      previous?.kind === 'text' &&
+      previous.role === 'user' &&
+      message.kind === 'text' &&
+      message.role === 'user' &&
+      previous.content === message.content &&
+      Math.abs(currentTime - previousTime) <= 5000
+    ) {
+      if (currentImages > previousImages) {
+        deduped[deduped.length - 1] = message;
+      }
+      continue;
+    }
+
+    deduped.push(message);
+  }
+
+  return deduped;
 }
 
 async function getCodexSessionMessages(
@@ -105,6 +202,25 @@ async function getCodexSessionMessages(
               content: entry.payload.message,
             },
           });
+        }
+
+        if (
+          entry.type === 'response_item' &&
+          entry.payload?.type === 'message' &&
+          entry.payload.role === 'user'
+        ) {
+          const userMessage = extractCodexUserContentAndImages(entry.payload.content);
+          if (userMessage.content || userMessage.images.length > 0) {
+            messages.push({
+              type: 'user',
+              timestamp: entry.timestamp,
+              message: {
+                role: 'user',
+                content: userMessage.content,
+                images: userMessage.images,
+              },
+            });
+          }
         }
 
         if (
@@ -288,15 +404,17 @@ export class CodexSessionsProvider implements IProviderSessions {
     }
 
     if (raw.message?.role === 'user') {
-      const content = typeof raw.message.content === 'string'
-        ? raw.message.content
-        : Array.isArray(raw.message.content)
-          ? raw.message.content
-              .map((part: string | AnyRecord) => typeof part === 'string' ? part : part?.text || '')
-              .filter(Boolean)
-              .join('\n')
-          : String(raw.message.content || '');
-      if (!content.trim()) {
+      const extracted = Array.isArray(raw.message.content)
+        ? extractCodexUserContentAndImages(raw.message.content)
+        : {
+            content: typeof raw.message.content === 'string'
+              ? raw.message.content
+              : String(raw.message.content || ''),
+            images: Array.isArray(raw.message.images)
+              ? raw.message.images as AnyRecord[]
+              : [],
+          };
+      if (!extracted.content.trim() && extracted.images.length === 0) {
         return [];
       }
       return [createNormalizedMessage({
@@ -306,7 +424,8 @@ export class CodexSessionsProvider implements IProviderSessions {
         provider: PROVIDER,
         kind: 'text',
         role: 'user',
-        content,
+        content: extracted.content,
+        images: extracted.images.length > 0 ? extracted.images : undefined,
       })];
     }
 
@@ -552,9 +671,10 @@ export class CodexSessionsProvider implements IProviderSessions {
       }
     }
 
-    const totalNormalized = normalized.length;
+    const dedupedNormalized = dedupeCodexUserMessages(normalized);
+    const totalNormalized = dedupedNormalized.length;
     let total = 0;
-    for (const msg of normalized) {
+    for (const msg of dedupedNormalized) {
       if (msg.kind !== 'tool_result') {
         total += 1;
       }
@@ -562,8 +682,8 @@ export class CodexSessionsProvider implements IProviderSessions {
     const normalizedOffset = Math.max(0, offset);
     const normalizedLimit = limit === null ? null : Math.max(0, limit);
     const messages = normalizedLimit === null
-      ? normalized
-      : normalized.slice(
+      ? dedupedNormalized
+      : dedupedNormalized.slice(
           Math.max(0, totalNormalized - normalizedOffset - normalizedLimit),
           Math.max(0, totalNormalized - normalizedOffset),
         );

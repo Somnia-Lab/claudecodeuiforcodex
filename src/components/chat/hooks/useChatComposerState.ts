@@ -701,6 +701,7 @@ export function useChatComposerState({
             model: codexModel,
             sessionSummary,
             permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
+            images: uploadedImages,
           },
         });
       } else if (provider === 'gemini') {
@@ -717,6 +718,7 @@ export function useChatComposerState({
             sessionSummary,
             permissionMode,
             toolsSettings,
+            images: uploadedImages,
           },
         });
       } else if (provider === 'opencode') {
