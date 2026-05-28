@@ -95,6 +95,48 @@ Open `http://localhost:3001` — all your existing sessions are discovered autom
 
 Visit the **[documentation →](https://cloudcli.ai/docs)** for full configuration options, PM2, remote server setup and more.
 
+#### Installing this fork
+
+If you want the Codex image support from `Somnia-Lab/claudecodeuiforcodex`, install from source instead of the published npm package:
+
+```bash
+git clone git@github.com:Somnia-Lab/claudecodeuiforcodex.git
+cd claudecodeuiforcodex
+npm ci
+npm run build
+npm install -g .
+cloudcli start --port 3001
+```
+
+This fork is source-first: `dist/` and `dist-server/` are built locally and are not committed to git.
+
+#### Syncing future upstream updates
+
+This repository is a GitHub fork of `siteboon/claudecodeui`, so you can keep your custom patch and still pull in upstream changes.
+
+Set the upstream remote once:
+
+```bash
+git remote add upstream https://github.com/siteboon/claudecodeui.git
+git fetch upstream --tags
+```
+
+Then update your fork:
+
+```bash
+git checkout main
+git fetch upstream --tags
+git rebase upstream/main
+git push origin main
+```
+
+If upstream changes conflict with the Codex image patch, resolve the conflicts locally, then continue:
+
+```bash
+git add <resolved-files>
+git rebase --continue
+```
+
 #### Docker Sandboxes (Experimental)
 
 Run agents in isolated sandboxes with hypervisor-level isolation. Starts Claude Code by default. Requires the [`sbx` CLI](https://docs.docker.com/ai/sandboxes/get-started/).
