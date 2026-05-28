@@ -91,6 +91,48 @@ cloudcli
 
 更多配置选项、PM2、远程服务器设置等，请参阅 **[文档 →](https://cloudcli.ai/docs)**。
 
+#### 安装这个 fork
+
+如果你要使用 `Somnia-Lab/claudecodeuiforcodex` 里带的 Codex 图片支持，请不要直接装 npm 官方包，而是从源码安装：
+
+```bash
+git clone git@github.com:Somnia-Lab/claudecodeuiforcodex.git
+cd claudecodeuiforcodex
+npm ci
+npm run build
+npm install -g .
+cloudcli start --port 3001
+```
+
+这个 fork 采用源码分发方式：`dist/` 和 `dist-server/` 需要在本机构建，不会直接提交到 git。
+
+#### 以后怎么同步原作者更新
+
+这个仓库是 `siteboon/claudecodeui` 的 GitHub fork，所以你可以保留自己的改动，同时继续同步原作者更新。
+
+第一次只需要配置一次 `upstream`：
+
+```bash
+git remote add upstream https://github.com/siteboon/claudecodeui.git
+git fetch upstream --tags
+```
+
+之后每次同步用这几步：
+
+```bash
+git checkout main
+git fetch upstream --tags
+git rebase upstream/main
+git push origin main
+```
+
+如果 upstream 改到了和 Codex 图片补丁相同的地方，出现冲突时先手动解决，再继续：
+
+```bash
+git add <已解决的文件>
+git rebase --continue
+```
+
 #### Docker Sandboxes（实验性）
 
 在隔离的沙箱中运行代理，具有虚拟机管理程序级别的隔离。默认启动 Claude Code。需要 [`sbx` CLI](https://docs.docker.com/ai/sandboxes/get-started/)。
