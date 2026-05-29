@@ -17,6 +17,7 @@ import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { safeLocalStorage } from '../utils/chatStorage';
 import type {
   ChatMessage,
+  ChatAttachment,
   PendingPermissionRequest,
   PermissionMode,
 } from '../types/types';
@@ -78,8 +79,21 @@ interface CommandExecutionResult {
   hasFileIncludes?: boolean;
 }
 
+const MAX_IMAGE_ATTACHMENTS = 5;
+const MAX_FILE_ATTACHMENTS = 10;
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+
 const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
+};
+
+const isImageFile = (file: File): boolean => file.type.startsWith('image/');
+
+const buildAttachmentPath = (targetPath: string, fileName: string): string => {
+  const normalizedTarget = targetPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalizedName = fileName.replace(/\\/g, '/').replace(/^\/+/, '');
+  return `${normalizedTarget}/${normalizedName}`;
 };
 
 const getNotificationSessionSummary = (
@@ -141,6 +155,7 @@ export function useChatComposerState({
     return '';
   });
   const [attachedImages, setAttachedImages] = useState<File[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
@@ -392,72 +407,99 @@ export function useChatComposerState({
     inputHighlightRef.current.scrollLeft = target.scrollLeft;
   }, []);
 
-  const handleImageFiles = useCallback((files: File[]) => {
-    const validFiles = files.filter((file) => {
+  const handleAcceptedFiles = useCallback((files: File[]) => {
+    const validImages: File[] = [];
+    const validFiles: File[] = [];
+
+    files.forEach((file) => {
       try {
         if (!file || typeof file !== 'object') {
           console.warn('Invalid file object:', file);
-          return false;
+          return;
         }
 
-        if (!file.type || !file.type.startsWith('image/')) {
-          return false;
+        if (isImageFile(file)) {
+          if (file.size > MAX_IMAGE_SIZE_BYTES) {
+            const fileName = file.name || 'Unknown file';
+            setImageErrors((previous) => {
+              const next = new Map(previous);
+              next.set(fileName, 'File too large (max 5MB)');
+              return next;
+            });
+            return;
+          }
+
+          validImages.push(file);
+          return;
         }
 
-        if (!file.size || file.size > 5 * 1024 * 1024) {
-          const fileName = file.name || 'Unknown file';
-          setImageErrors((previous) => {
-            const next = new Map(previous);
-            next.set(fileName, 'File too large (max 5MB)');
-            return next;
-          });
-          return false;
+        if (provider !== 'codex') {
+          return;
         }
 
-        return true;
+        if (file.size > MAX_FILE_SIZE_BYTES) {
+          console.warn(`Skipping oversized attachment: ${file.name}`);
+          return;
+        }
+
+        validFiles.push(file);
       } catch (error) {
         console.error('Error validating file:', error, file);
-        return false;
       }
     });
 
-    if (validFiles.length > 0) {
-      setAttachedImages((previous) => [...previous, ...validFiles].slice(0, 5));
+    if (validImages.length > 0) {
+      setAttachedImages((previous) =>
+        [...previous, ...validImages].slice(0, MAX_IMAGE_ATTACHMENTS),
+      );
     }
-  }, []);
+
+    if (validFiles.length > 0) {
+      setAttachedFiles((previous) =>
+        [...previous, ...validFiles].slice(0, MAX_FILE_ATTACHMENTS),
+      );
+    }
+  }, [provider]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
       const items = Array.from(event.clipboardData.items);
 
       items.forEach((item) => {
-        if (!item.type.startsWith('image/')) {
+        if (item.kind !== 'file') {
           return;
         }
+
         const file = item.getAsFile();
         if (file) {
-          handleImageFiles([file]);
+          if (isImageFile(file) || provider === 'codex') {
+            handleAcceptedFiles([file]);
+          }
         }
       });
 
       if (items.length === 0 && event.clipboardData.files.length > 0) {
         const files = Array.from(event.clipboardData.files);
-        const imageFiles = files.filter((file) => file.type.startsWith('image/'));
-        if (imageFiles.length > 0) {
-          handleImageFiles(imageFiles);
+        const acceptedFiles = provider === 'codex'
+          ? files
+          : files.filter((file) => isImageFile(file));
+        if (acceptedFiles.length > 0) {
+          handleAcceptedFiles(acceptedFiles);
         }
       }
     },
-    [handleImageFiles],
+    [handleAcceptedFiles, provider],
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
-    accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'],
-    },
-    maxSize: 5 * 1024 * 1024,
-    maxFiles: 5,
-    onDrop: handleImageFiles,
+    accept: provider === 'codex'
+      ? undefined
+      : {
+          'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'],
+        },
+    maxSize: provider === 'codex' ? MAX_FILE_SIZE_BYTES : MAX_IMAGE_SIZE_BYTES,
+    maxFiles: provider === 'codex' ? MAX_IMAGE_ATTACHMENTS + MAX_FILE_ATTACHMENTS : MAX_IMAGE_ATTACHMENTS,
+    onDrop: handleAcceptedFiles,
     noClick: true,
     noKeyboard: true,
   });
@@ -483,6 +525,7 @@ export function useChatComposerState({
           setInput('');
           inputValueRef.current = '';
           setAttachedImages([]);
+          setAttachedFiles([]);
           setUploadingImages(new Map());
           setImageErrors(new Map());
           resetCommandMenuState();
@@ -498,6 +541,58 @@ export function useChatComposerState({
       const selectedThinkingMode = thinkingModes.find((mode: { id: string; prefix?: string }) => mode.id === thinkingMode);
       if (selectedThinkingMode && selectedThinkingMode.prefix) {
         messageContent = `${selectedThinkingMode.prefix}: ${currentInput}`;
+      }
+
+      let uploadedAttachments: ChatAttachment[] = [];
+      if (provider === 'codex' && attachedFiles.length > 0) {
+        const attachmentBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const targetPath = `.tmp/chat-attachments/${attachmentBatchId}`;
+        const formData = new FormData();
+        formData.append('targetPath', targetPath);
+        attachedFiles.forEach((file) => {
+          formData.append('files', file);
+        });
+
+        try {
+          const response = await authenticatedFetch(`/api/projects/${selectedProject.projectId}/files/upload`, {
+            method: 'POST',
+            headers: {},
+            body: formData,
+          });
+
+          if (!response.ok) {
+            throw new Error('Failed to upload files');
+          }
+
+          const result = await response.json();
+          const uploadedFiles = Array.isArray(result.files) ? result.files : [];
+          uploadedAttachments = uploadedFiles
+            .map((uploadedFile: Record<string, unknown>, index: number) => {
+              const uploadedName = typeof uploadedFile.name === 'string'
+                ? uploadedFile.name
+                : attachedFiles[index]?.name;
+              const fallbackName = attachedFiles[index]?.name || `attachment-${index + 1}`;
+              const displayName = uploadedName?.split('/').pop() || fallbackName;
+              const attachmentPath = buildAttachmentPath(targetPath, uploadedName || fallbackName);
+
+              return {
+                name: displayName,
+                path: attachmentPath,
+                size: typeof uploadedFile.size === 'number' ? uploadedFile.size : attachedFiles[index]?.size,
+                mimeType: typeof uploadedFile.mimeType === 'string' ? uploadedFile.mimeType : attachedFiles[index]?.type,
+              };
+            })
+            .filter((attachment: ChatAttachment) => Boolean(attachment.path));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          console.error('File upload failed:', error);
+          addMessage({
+            type: 'error',
+            content: `Failed to upload files: ${message}`,
+            timestamp: new Date(),
+          });
+          return;
+        }
       }
 
       let uploadedImages: unknown[] = [];
@@ -539,6 +634,7 @@ export function useChatComposerState({
         type: 'user',
         content: currentInput,
         images: uploadedImages as any,
+        attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         timestamp: new Date(),
       };
 
@@ -627,6 +723,7 @@ export function useChatComposerState({
             sessionSummary,
             permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
             images: uploadedImages,
+            attachments: uploadedAttachments,
           },
         });
       } else if (provider === 'gemini') {
@@ -668,6 +765,7 @@ export function useChatComposerState({
       inputValueRef.current = '';
       resetCommandMenuState();
       setAttachedImages([]);
+      setAttachedFiles([]);
       setUploadingImages(new Map());
       setImageErrors(new Map());
       setIsTextareaExpanded(false);
@@ -681,6 +779,7 @@ export function useChatComposerState({
     },
     [
       selectedSession,
+      attachedFiles,
       attachedImages,
       claudeModel,
       codexModel,
@@ -715,6 +814,14 @@ export function useChatComposerState({
   useEffect(() => {
     inputValueRef.current = input;
   }, [input]);
+
+  useEffect(() => {
+    if (provider === 'codex' || attachedFiles.length === 0) {
+      return;
+    }
+
+    setAttachedFiles([]);
+  }, [attachedFiles.length, provider]);
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -963,6 +1070,8 @@ export function useChatComposerState({
     selectFile,
     attachedImages,
     setAttachedImages,
+    attachedFiles,
+    setAttachedFiles,
     uploadingImages,
     imageErrors,
     getRootProps,

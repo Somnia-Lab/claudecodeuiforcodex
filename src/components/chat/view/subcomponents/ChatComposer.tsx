@@ -11,10 +11,11 @@ import type {
   SetStateAction,
   TouchEvent,
 } from 'react';
-import { ImageIcon, MessageSquareIcon, XIcon, ArrowDownIcon } from 'lucide-react';
+import { ImageIcon, MessageSquareIcon, XIcon, ArrowDownIcon, PaperclipIcon } from 'lucide-react';
 import type { PendingPermissionRequest, PermissionMode, Provider } from '../../types/types';
 import CommandMenu from './CommandMenu';
 import ClaudeStatus from './ClaudeStatus';
+import FileAttachment from './FileAttachment';
 import ImageAttachment from './ImageAttachment';
 import PermissionRequestsBanner from './PermissionRequestsBanner';
 import ThinkingModeSelector from './ThinkingModeSelector';
@@ -71,7 +72,9 @@ interface ChatComposerProps {
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
   attachedImages: File[];
+  attachedFiles: File[];
   onRemoveImage: (index: number) => void;
+  onRemoveFile: (index: number) => void;
   uploadingImages: Map<string, number>;
   imageErrors: Map<string, string>;
   showFileDropdown: boolean;
@@ -126,7 +129,9 @@ export default function ChatComposer({
   onSubmit,
   isDragActive,
   attachedImages,
+  attachedFiles,
   onRemoveImage,
+  onRemoveFile,
   uploadingImages,
   imageErrors,
   showFileDropdown,
@@ -172,6 +177,7 @@ export default function ChatComposer({
 
   // Hide the thinking/status bar while any permission request is pending
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
+  const isCodexProvider = provider === 'codex';
 
   return (
     <div className="flex-shrink-0 p-2 pb-2 sm:p-4 sm:pb-4 md:p-4 md:pb-6">
@@ -261,12 +267,14 @@ export default function ChatComposer({
                     d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                   />
                 </svg>
-                <p className="text-sm font-medium">Drop images here</p>
+                <p className="text-sm font-medium">
+                  {isCodexProvider ? 'Drop files or images here' : 'Drop images here'}
+                </p>
               </div>
             </div>
           )}
 
-          {attachedImages.length > 0 && (
+          {(attachedImages.length > 0 || attachedFiles.length > 0) && (
             <PromptInputHeader>
               <div className="rounded-xl bg-muted/40 p-2">
                 <div className="flex flex-wrap gap-2">
@@ -278,6 +286,16 @@ export default function ChatComposer({
                       uploadProgress={uploadingImages.get(file.name)}
                       error={imageErrors.get(file.name)}
                     />
+                  ))}
+                  {attachedFiles.map((file, index) => (
+                    <div key={`${file.name}-${index}`} className="min-w-0 max-w-full">
+                      <FileAttachment
+                        name={file.name}
+                        size={file.size}
+                        mimeType={file.type}
+                        onRemove={() => onRemoveFile(index)}
+                      />
+                    </div>
                   ))}
                 </div>
               </div>
@@ -311,10 +329,14 @@ export default function ChatComposer({
         <PromptInputFooter>
           <PromptInputTools>
             <PromptInputButton
-              tooltip={{ content: t('input.attachImages') }}
+              tooltip={{
+                content: isCodexProvider
+                  ? t('input.attachFiles', { defaultValue: 'Attach files or images' })
+                  : t('input.attachImages'),
+              }}
               onClick={openImagePicker}
             >
-              <ImageIcon />
+              {isCodexProvider ? <PaperclipIcon /> : <ImageIcon />}
             </PromptInputButton>
 
             <button

@@ -152,6 +152,8 @@ function ChatInterface({
     selectFile,
     attachedImages,
     setAttachedImages,
+    attachedFiles,
+    setAttachedFiles,
     uploadingImages,
     imageErrors,
     getRootProps,
@@ -367,8 +369,14 @@ function ChatInterface({
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
           attachedImages={attachedImages}
+          attachedFiles={attachedFiles}
           onRemoveImage={(index) =>
             setAttachedImages((previous) =>
+              previous.filter((_, currentIndex) => currentIndex !== index),
+            )
+          }
+          onRemoveFile={(index) =>
+            setAttachedFiles((previous) =>
               previous.filter((_, currentIndex) => currentIndex !== index),
             )
           }

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
   ChatMessage,
+  ChatAttachment,
   ClaudePermissionSuggestion,
   PermissionGrantResult,
   Provider,
@@ -13,6 +14,7 @@ import type { Project } from '../../../../types/app';
 import { ToolRenderer, shouldHideToolResult } from '../../tools';
 import { Reasoning, ReasoningTrigger, ReasoningContent } from '../../../../shared/view/ui';
 import { Markdown } from './Markdown';
+import FileAttachment from './FileAttachment';
 import MessageCopyControl from './MessageCopyControl';
 
 type DiffLine = {
@@ -105,6 +107,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
 
   const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
+  const attachments = Array.isArray(message.attachments)
+    ? message.attachments as ChatAttachment[]
+    : [];
 
   if (shouldHideThinkingMessage) {
     return null;
@@ -132,6 +137,20 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
                     alt={img.name}
                     className="h-auto max-w-full cursor-pointer rounded-lg transition-opacity hover:opacity-90"
                     onClick={() => window.open(img.data, '_blank')}
+                  />
+                ))}
+              </div>
+            )}
+            {attachments.length > 0 && (
+              <div className="mt-2 space-y-2">
+                {attachments.map((attachment, index) => (
+                  <FileAttachment
+                    key={`${attachment.path}-${index}`}
+                    name={attachment.name}
+                    path={attachment.path}
+                    size={attachment.size}
+                    mimeType={attachment.mimeType}
+                    compact
                   />
                 ))}
               </div>
@@ -469,4 +488,3 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, o
 });
 
 export default MessageComponent;
-
