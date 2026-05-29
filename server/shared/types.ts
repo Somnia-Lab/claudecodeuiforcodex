@@ -205,6 +205,7 @@ export type NormalizedMessage = {
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
   images?: unknown;
+  attachments?: unknown;
   toolName?: string;
   toolInput?: unknown;
   toolId?: string;

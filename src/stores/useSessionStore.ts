@@ -54,7 +54,8 @@ export interface NormalizedMessage {
   isLocalCommand?: boolean;
   isLocalCommandStdout?: boolean;
   isCompactSummary?: boolean;
-  images?: string[];
+  images?: unknown[];
+  attachments?: unknown[];
   toolName?: string;
   toolInput?: unknown;
   toolId?: string;
@@ -125,7 +126,25 @@ function createEmptySlot(): SessionSlot {
 function userTextFingerprint(m: NormalizedMessage): string | null {
   if (m.kind !== 'text' || m.role !== 'user') return null;
   const t = (m.content || '').trim();
-  return t.length > 0 ? t : null;
+  const imageCount = Array.isArray(m.images) ? m.images.length : 0;
+  const attachmentPaths = Array.isArray(m.attachments)
+    ? m.attachments
+        .map((attachment) => {
+          if (!attachment || typeof attachment !== 'object') {
+            return '';
+          }
+          const record = attachment as { path?: string };
+          return typeof record.path === 'string' ? record.path : '';
+        })
+        .filter(Boolean)
+        .join('|')
+    : '';
+
+  if (t.length === 0 && imageCount === 0 && attachmentPaths.length === 0) {
+    return null;
+  }
+
+  return `${t}__images:${imageCount}__attachments:${attachmentPaths}`;
 }
 
 /**

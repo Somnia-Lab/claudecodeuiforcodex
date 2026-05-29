@@ -222,13 +222,61 @@ function getImageExtension(mimeType) {
   return rawExtension.split('+')[0] || 'png';
 }
 
-async function buildCodexInput(command, images, cwd) {
+function normalizeCodexAttachmentRecord(attachment) {
+  if (!attachment || typeof attachment !== 'object') {
+    return null;
+  }
+
+  const attachmentPath = typeof attachment.path === 'string' ? attachment.path.trim() : '';
+  if (!attachmentPath) {
+    return null;
+  }
+
+  const attachmentName = typeof attachment.name === 'string' && attachment.name.trim()
+    ? attachment.name.trim()
+    : path.basename(attachmentPath);
+  const normalized = {
+    name: attachmentName,
+    path: attachmentPath,
+  };
+
+  if (typeof attachment.size === 'number') {
+    normalized.size = attachment.size;
+  }
+
+  if (typeof attachment.mimeType === 'string' && attachment.mimeType.trim()) {
+    normalized.mimeType = attachment.mimeType.trim();
+  }
+
+  return normalized;
+}
+
+function appendCodexAttachments(command, attachments) {
+  const normalizedAttachments = Array.isArray(attachments)
+    ? attachments
+        .map((attachment) => normalizeCodexAttachmentRecord(attachment))
+        .filter(Boolean)
+    : [];
+
+  if (normalizedAttachments.length === 0) {
+    return command;
+  }
+
+  const attachmentBlock = normalizedAttachments
+    .map((attachment) => JSON.stringify(attachment))
+    .join('\n');
+
+  return `${command}\n\n<cloudcli-file-attachments>\n${attachmentBlock}\n</cloudcli-file-attachments>`;
+}
+
+async function buildCodexInput(command, images, attachments, cwd) {
   const tempImagePaths = [];
   let tempDir = null;
+  const commandWithAttachments = appendCodexAttachments(command, attachments);
 
   if (!images || images.length === 0) {
     return {
-      input: command,
+      input: commandWithAttachments,
       tempImagePaths,
       tempDir
     };
@@ -256,7 +304,7 @@ async function buildCodexInput(command, images, cwd) {
   } catch (error) {
     console.error('[Codex] Error processing images:', error);
     return {
-      input: command,
+      input: commandWithAttachments,
       tempImagePaths,
       tempDir
     };
@@ -264,7 +312,7 @@ async function buildCodexInput(command, images, cwd) {
 
   if (tempImagePaths.length === 0) {
     return {
-      input: command,
+      input: commandWithAttachments,
       tempImagePaths,
       tempDir
     };
@@ -272,7 +320,7 @@ async function buildCodexInput(command, images, cwd) {
 
   return {
     input: [
-      { type: 'text', text: command },
+      { type: 'text', text: commandWithAttachments },
       ...tempImagePaths.map((imagePath) => ({ type: 'local_image', path: imagePath }))
     ],
     tempImagePaths,
@@ -370,7 +418,12 @@ export async function queryCodex(command, options = {}, ws) {
       registerSession(capturedSessionId);
     }
 
-    const imageInput = await buildCodexInput(command, options.images, workingDirectory);
+    const imageInput = await buildCodexInput(
+      command,
+      options.images,
+      options.attachments,
+      workingDirectory,
+    );
     const input = imageInput.input;
     tempImagePaths = imageInput.tempImagePaths;
     tempDir = imageInput.tempDir;
