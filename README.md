@@ -97,7 +97,7 @@ Visit the **[documentation →](https://cloudcli.ai/docs)** for full configurati
 
 #### Installing this fork
 
-If you want the Codex image support from `Somnia-Lab/claudecodeuiforcodex`, install from source instead of the published npm package:
+If you want the Codex image and file attachment support from `Somnia-Lab/claudecodeuiforcodex`, install from source instead of the published npm package:
 
 ```bash
 git clone git@github.com:Somnia-Lab/claudecodeuiforcodex.git
@@ -109,6 +109,22 @@ cloudcli start --port 3001
 ```
 
 This fork is source-first: `dist/` and `dist-server/` are built locally and are not committed to git.
+
+#### Changing the self-hosted password
+
+This fork includes a local password helper for self-hosted installs:
+
+```bash
+node scripts/cloudcli-passwd.js [username]
+```
+
+To expose it as `cloudcli-passwd` on Linux/macOS:
+
+```bash
+install -m 755 scripts/cloudcli-passwd.js ~/.local/bin/cloudcli-passwd
+```
+
+If you omit `[username]`, the helper uses the only active user in `~/.cloudcli/auth.db`. Override paths with `CLOUDCLI_DB_PATH`, `CLOUDCLI_INSTALL_DIR`, or `CLOUDCLI_PACKAGE_JSON`.
 
 #### Syncing future upstream updates
 
@@ -126,15 +142,18 @@ Then update your fork:
 ```bash
 git checkout main
 git fetch upstream --tags
-git rebase upstream/main
+git merge upstream/main
+npm ci
+npm run typecheck
+npm run build
 git push origin main
 ```
 
-If upstream changes conflict with the Codex image patch, resolve the conflicts locally, then continue:
+If upstream changes conflict with the Codex image/file attachment patch, resolve the conflicts locally, then continue:
 
 ```bash
 git add <resolved-files>
-git rebase --continue
+git commit
 ```
 
 #### Docker Sandboxes (Experimental)

@@ -93,7 +93,7 @@ cloudcli
 
 #### 安装这个 fork
 
-如果你要使用 `Somnia-Lab/claudecodeuiforcodex` 里带的 Codex 图片支持，请不要直接装 npm 官方包，而是从源码安装：
+如果你要使用 `Somnia-Lab/claudecodeuiforcodex` 里带的 Codex 图片和文件附件支持，请不要直接装 npm 官方包，而是从源码安装：
 
 ```bash
 git clone git@github.com:Somnia-Lab/claudecodeuiforcodex.git
@@ -105,6 +105,22 @@ cloudcli start --port 3001
 ```
 
 这个 fork 采用源码分发方式：`dist/` 和 `dist-server/` 需要在本机构建，不会直接提交到 git。
+
+#### 修改自托管密码
+
+这个 fork 内置了本地密码修改 helper：
+
+```bash
+node scripts/cloudcli-passwd.js [username]
+```
+
+在 Linux/macOS 上也可以安装成 `cloudcli-passwd`：
+
+```bash
+install -m 755 scripts/cloudcli-passwd.js ~/.local/bin/cloudcli-passwd
+```
+
+如果省略 `[username]`，脚本会使用 `~/.cloudcli/auth.db` 中唯一的 active 用户。路径可通过 `CLOUDCLI_DB_PATH`、`CLOUDCLI_INSTALL_DIR` 或 `CLOUDCLI_PACKAGE_JSON` 覆盖。
 
 #### 以后怎么同步原作者更新
 
@@ -122,15 +138,18 @@ git fetch upstream --tags
 ```bash
 git checkout main
 git fetch upstream --tags
-git rebase upstream/main
+git merge upstream/main
+npm ci
+npm run typecheck
+npm run build
 git push origin main
 ```
 
-如果 upstream 改到了和 Codex 图片补丁相同的地方，出现冲突时先手动解决，再继续：
+如果 upstream 改到了和 Codex 图片/文件附件补丁相同的地方，出现冲突时先手动解决，再继续：
 
 ```bash
 git add <已解决的文件>
-git rebase --continue
+git commit
 ```
 
 #### Docker Sandboxes（实验性）
