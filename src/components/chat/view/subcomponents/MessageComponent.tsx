@@ -1,10 +1,10 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
-  ChatMessage,
   ChatAttachment,
+  ChatMessage,
   ClaudePermissionSuggestion,
   PermissionGrantResult,
   Provider,
@@ -14,9 +14,11 @@ import type { Project } from '../../../../types/app';
 import { ToolRenderer, shouldHideToolResult } from '../../tools';
 import { Reasoning, ReasoningTrigger, ReasoningContent } from '../../../../shared/view/ui';
 
-import { Markdown } from './Markdown';
+import ChatMessageImages from './ChatMessageImages';
 import FileAttachment from './FileAttachment';
+import { Markdown } from './Markdown';
 import MessageCopyControl from './MessageCopyControl';
+import MessageSpeakControl from './MessageSpeakControl';
 
 type DiffLine = {
   type: string;
@@ -31,7 +33,6 @@ type MessageComponentProps = {
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
   onGrantToolPermission?: (suggestion: ClaudePermissionSuggestion) => PermissionGrantResult | null | undefined;
-  autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
   selectedProject?: Project | null;
@@ -46,7 +47,7 @@ type InteractiveOption = {
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, autoExpandTools, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -54,7 +55,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
       (prevMessage.type === 'tool') ||
       (prevMessage.type === 'error'));
   const messageRef = useRef<HTMLDivElement | null>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
   const userCopyContent = String(message.content || '');
   const formattedMessageContent = useMemo(
     () => formatUsageLimitText(String(message.content || '')),
@@ -71,39 +71,13 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
     assistantCopyContent.trim().length > 0 &&
     !isCommandOrFileEditToolResponse &&
     !message.isThinking;
-
-
-  useEffect(() => {
-    const node = messageRef.current;
-    if (!autoExpandTools || !node || !message.isToolUse) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && !isExpanded) {
-            setIsExpanded(true);
-            const details = node.querySelectorAll<HTMLDetailsElement>('details');
-            details.forEach((detail) => {
-              detail.open = true;
-            });
-          }
-        });
-      },
-      { threshold: 0.1 }
-    );
-
-    observer.observe(node);
-
-    return () => {
-      observer.unobserve(node);
-    };
-  }, [autoExpandTools, isExpanded, message.isToolUse]);
-
-  const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
-  const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
   const attachments = Array.isArray(message.attachments)
     ? message.attachments as ChatAttachment[]
     : [];
+
+
+  const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
+  const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
 
   if (shouldHideThinkingMessage) {
     return null;
@@ -116,27 +90,17 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
       className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
       {message.type === 'user' ? (
-        /* User message bubble on the right */
+        /* User turn on the right: claude.ai-style attachment cards above the bubble */
         <div className="flex w-full items-end space-x-0 sm:w-auto sm:max-w-[85%] sm:space-x-3 md:max-w-md lg:max-w-lg xl:max-w-xl">
-          <div className="group flex-1 rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:flex-initial sm:px-4">
-            <div dir="auto" className="whitespace-pre-wrap break-words text-sm">
-              {message.content}
-            </div>
+          <div className="flex min-w-0 flex-1 flex-col items-end gap-2 sm:flex-initial">
             {message.images && message.images.length > 0 && (
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                {message.images.map((img, idx) => (
-                  <img
-                    key={img.name || idx}
-                    src={img.data}
-                    alt={img.name}
-                    className="h-auto max-w-full cursor-pointer rounded-lg transition-opacity hover:opacity-90"
-                    onClick={() => window.open(img.data, '_blank')}
-                  />
-                ))}
-              </div>
+              <ChatMessageImages
+                images={message.images}
+                projectId={selectedProject?.projectId}
+              />
             )}
             {attachments.length > 0 && (
-              <div className="mt-2 space-y-2">
+              <div className="w-full max-w-full space-y-2">
                 {attachments.map((attachment, index) => (
                   <FileAttachment
                     key={`${attachment.path}-${index}`}
@@ -149,12 +113,24 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                 ))}
               </div>
             )}
-            <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
-              {shouldShowUserCopyControl && (
-                <MessageCopyControl content={userCopyContent} messageType="user" />
-              )}
-              <span>{formattedTime}</span>
-            </div>
+            {userCopyContent.trim().length > 0 || (!message.images?.length && attachments.length === 0) ? (
+              <div className="group max-w-full rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-white shadow-sm sm:px-4">
+                <div dir="auto" className="whitespace-pre-wrap break-words font-serif text-sm">
+                  {message.content}
+                </div>
+                <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
+                  {shouldShowUserCopyControl && (
+                    <MessageCopyControl content={userCopyContent} messageType="user" />
+                  )}
+                  <span>{formattedTime}</span>
+                </div>
+              </div>
+            ) : (
+              /* Image-only turn: no text bubble, but the timestamp still shows */
+              <div className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
+                <span>{formattedTime}</span>
+              </div>
+            )}
           </div>
           {!isGrouped && (
             <div className="hidden h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm text-white sm:flex">
@@ -184,7 +160,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                   🔧
                 </div>
               ) : (
-                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full p-1 text-sm text-white">
+                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full p-1 text-sm text-foreground">
                   <SessionProviderLogo provider={provider} className="h-full w-full" />
                 </div>
               )}
@@ -197,9 +173,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                         ? t('messageTypes.cursor')
                         : provider === 'codex'
                           ? t('messageTypes.codex')
-                          : provider === 'gemini'
-                            ? t('messageTypes.gemini')
-                            : provider === 'opencode'
+                          : provider === 'opencode'
                               ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
                               : t('messageTypes.claude'))}
               </div>
@@ -212,7 +186,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
               <>
                 <div className="flex flex-col">
                   <div className="flex flex-col">
-                    <Markdown className="prose prose-sm max-w-none dark:prose-invert">
+                    <Markdown className="prose prose-sm max-w-none font-serif dark:prose-invert">
                       {String(message.displayText || '')}
                     </Markdown>
                   </div>
@@ -228,7 +202,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                     onFileOpen={onFileOpen}
                     createDiff={createDiff}
                     selectedProject={selectedProject}
-                    autoExpandTools={autoExpandTools}
                     showRawParameters={showRawParameters}
                     rawToolInput={typeof message.toolInput === 'string' ? message.toolInput : undefined}
                     isSubagentContainer={message.isSubagentContainer}
@@ -236,8 +209,8 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                   />
                 )}
 
-                {/* Tool Result Section */}
-                {message.toolResult && !shouldHideToolResult(message.toolName || 'UnknownTool', message.toolResult) && (
+                {/* Tool Result Section — Bash renders its output inside the command row above. */}
+                {message.toolResult && message.toolName !== 'Bash' && !shouldHideToolResult(message.toolName || 'UnknownTool', message.toolResult) && (
                   message.toolResult.isError ? (
                     // Error results - red error box with content
                     <div
@@ -251,7 +224,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                         <span className="text-xs font-medium text-red-700 dark:text-red-300">{t('messageTypes.error')}</span>
                       </div>
                       <div className="relative text-sm text-red-900 dark:text-red-100">
-                        <Markdown className="prose prose-sm prose-red max-w-none dark:prose-invert">
+                        <Markdown className="prose prose-sm prose-red max-w-none font-serif dark:prose-invert">
                           {String(message.toolResult.content || '')}
                         </Markdown>
                       </div>
@@ -268,7 +241,6 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
                         onFileOpen={onFileOpen}
                         createDiff={createDiff}
                         selectedProject={selectedProject}
-                        autoExpandTools={autoExpandTools}
                       />
                     </div>
                   )
@@ -360,7 +332,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
               <Reasoning defaultOpen={false}>
                 <ReasoningTrigger />
                 <ReasoningContent>
-                  <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert">
+                  <Markdown className="prose prose-sm prose-gray max-w-none font-serif dark:prose-invert">
                     {message.content}
                   </Markdown>
                   <div className="mt-3 flex items-center text-[11px]">
@@ -395,15 +367,15 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
 
                       return (
                         <div className="my-2">
-                          <div className="mb-2 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
                             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
                             </svg>
                             <span className="font-medium">{t('json.response')}</span>
                           </div>
-                          <div className="overflow-hidden rounded-lg border border-gray-600/30 bg-gray-800 dark:border-gray-700 dark:bg-gray-900">
+                          <div className="overflow-hidden rounded-lg border border-border bg-muted">
                             <pre className="overflow-x-auto p-4">
-                              <code className="block whitespace-pre font-mono text-sm text-gray-100 dark:text-gray-200">
+                              <code className="block whitespace-pre font-mono text-sm text-foreground">
                                 {formatted}
                               </code>
                             </pre>
@@ -417,7 +389,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
 
                   // Normal rendering for non-JSON content
                   return message.type === 'assistant' ? (
-                    <Markdown className="prose prose-sm prose-gray max-w-none dark:prose-invert">
+                    <Markdown className="prose prose-sm prose-gray max-w-none font-serif dark:prose-invert">
                       {content}
                     </Markdown>
                   ) : (
@@ -433,6 +405,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
               <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
                 {shouldShowAssistantCopyControl && (
                   <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
+                )}
+                {shouldShowAssistantCopyControl && (
+                  <MessageSpeakControl content={assistantCopyContent} />
                 )}
                 {!isGrouped && <span>{formattedTime}</span>}
               </div>

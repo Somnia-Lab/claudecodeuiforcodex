@@ -2,12 +2,12 @@ import fsSync from 'node:fs';
 import readline from 'node:readline';
 
 import { sessionsDb } from '@/modules/database/index.js';
+import { toImageAttachments } from '@/shared/image-attachments.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
 import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
-import { createNormalizedMessage, generateMessageId, readObjectRecord } from '@/shared/utils.js';
+import { createNormalizedMessage, generateMessageId, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
 
 const PROVIDER = 'codex';
-const CODEX_IMAGE_OPEN_TAG_RE = /^<image name=(.+)>$/;
 const CODEX_ATTACHMENT_OPEN_TAG = '<cloudcli-file-attachments>';
 const CODEX_ATTACHMENT_CLOSE_TAG = '</cloudcli-file-attachments>';
 
@@ -34,42 +34,43 @@ function isVisibleCodexUserMessage(payload: AnyRecord | null | undefined): boole
   return typeof payload.message === 'string' && payload.message.trim().length > 0;
 }
 
-function extractCodexTextContent(content: unknown): string {
-  if (!Array.isArray(content)) {
-    return typeof content === 'string' ? content : '';
+/**
+ * Reads the image attachments Codex records on `user_message` events.
+ * Turns sent with `local_image` input items land in `local_images` as file
+ * paths (verified against real rollout JSONL); the `images` array can carry
+ * base64 data URLs, which are passed through as inline `data` attachments so
+ * the UI can preview them without a file lookup.
+ *
+ * Exported for tests.
+ */
+export function extractCodexUserImages(
+  payload: AnyRecord | null | undefined,
+): Array<{ path?: string; data?: string }> | undefined {
+  if (!payload) {
+    return undefined;
   }
 
-  return content
-    .map((item) => {
-      if (!item || typeof item !== 'object') {
-        return '';
-      }
+  const candidates = [
+    ...(Array.isArray(payload.local_images) ? payload.local_images : []),
+    ...(Array.isArray(payload.images) ? payload.images : []),
+  ];
 
-      const record = item as AnyRecord;
-      if (
-        (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
-        && typeof record.text === 'string'
-      ) {
-        return record.text;
-      }
-
-      return '';
-    })
-    .filter(Boolean)
-    .join('\n');
-}
-
-function isHiddenCodexUserText(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed.startsWith('# AGENTS.md instructions for ')
-    || trimmed.startsWith('<environment_context>');
-}
-
-function normalizeCodexAttachmentRecord(record: AnyRecord | null): AnyRecord | null {
-  if (!record) {
-    return null;
+  const attachments: Array<{ path?: string; data?: string }> = [];
+  for (const entry of candidates) {
+    if (typeof entry !== 'string' || !entry.trim()) {
+      continue;
+    }
+    if (entry.startsWith('data:')) {
+      attachments.push({ data: entry });
+    } else {
+      attachments.push(...toImageAttachments([entry]));
+    }
   }
 
+  return attachments.length > 0 ? attachments : undefined;
+}
+
+function normalizeCodexAttachmentRecord(record: AnyRecord): AnyRecord | null {
   const attachmentPath = typeof record.path === 'string' ? record.path.trim() : '';
   if (!attachmentPath) {
     return null;
@@ -96,21 +97,20 @@ function normalizeCodexAttachmentRecord(record: AnyRecord | null): AnyRecord | n
 
 function parseCodexAttachmentBlock(text: string): { cleanedText: string; attachments: AnyRecord[] } {
   const attachmentBlockRe = new RegExp(
-    `${CODEX_ATTACHMENT_OPEN_TAG}\\s*([\\s\\S]*?)\\s*${CODEX_ATTACHMENT_CLOSE_TAG}`,
+    `${CODEX_ATTACHMENT_OPEN_TAG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*([\\s\\S]*?)\\s*${CODEX_ATTACHMENT_CLOSE_TAG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
     'g',
   );
   const attachments = new Map<string, AnyRecord>();
 
   for (const match of text.matchAll(attachmentBlockRe)) {
-    const rawBlock = match[1] || '';
-    const lines = rawBlock
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    for (const line of lines) {
+    const inner = match[1] || '';
+    for (const line of inner.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
       try {
-        const parsed = readObjectRecord(JSON.parse(line));
+        const parsed = JSON.parse(trimmed) as AnyRecord;
         const normalized = normalizeCodexAttachmentRecord(parsed);
         if (normalized?.path) {
           attachments.set(normalized.path, normalized);
@@ -121,123 +121,38 @@ function parseCodexAttachmentBlock(text: string): { cleanedText: string; attachm
     }
   }
 
-  const cleanedText = text
-    .replace(attachmentBlockRe, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
   return {
-    cleanedText,
+    cleanedText: text
+      .replace(attachmentBlockRe, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim(),
     attachments: Array.from(attachments.values()),
   };
 }
 
-function extractCodexUserContentAndImages(
-  content: unknown,
-): { content: string; images: AnyRecord[]; attachments: AnyRecord[] } {
+function extractCodexTextContent(content: unknown): string {
   if (!Array.isArray(content)) {
-    const rawText = typeof content === 'string' ? content : '';
-    const parsed = parseCodexAttachmentBlock(rawText);
-    return {
-      content: parsed.cleanedText,
-      images: [],
-      attachments: parsed.attachments,
-    };
+    return typeof content === 'string' ? content : '';
   }
 
-  const textParts: string[] = [];
-  const images: AnyRecord[] = [];
-  const attachments = new Map<string, AnyRecord>();
-  let pendingImageName: string | null = null;
-
-  for (const item of content) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-
-    const record = item as AnyRecord;
-
-    if (
-      (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
-      && typeof record.text === 'string'
-    ) {
-      const text = record.text;
-      const trimmed = text.trim();
-      const imageTagMatch = trimmed.match(CODEX_IMAGE_OPEN_TAG_RE);
-
-      if (imageTagMatch) {
-        pendingImageName = imageTagMatch[1]?.trim() || null;
-        continue;
+  return content
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
       }
 
-      if (trimmed === '</image>') {
-        pendingImageName = null;
-        continue;
+      const record = item as AnyRecord;
+      if (
+        (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text')
+        && typeof record.text === 'string'
+      ) {
+        return record.text;
       }
 
-      if (isHiddenCodexUserText(text)) {
-        continue;
-      }
-
-      const parsed = parseCodexAttachmentBlock(text);
-      parsed.attachments.forEach((attachment) => {
-        if (attachment?.path) {
-          attachments.set(attachment.path, attachment);
-        }
-      });
-
-      if (parsed.cleanedText) {
-        textParts.push(parsed.cleanedText);
-      }
-      continue;
-    }
-
-    if (record.type === 'input_image' && typeof record.image_url === 'string') {
-      images.push({
-        name: pendingImageName || `Image ${images.length + 1}`,
-        data: record.image_url,
-      });
-      pendingImageName = null;
-    }
-  }
-
-  return {
-    content: textParts.filter(Boolean).join('\n').trim(),
-    images,
-    attachments: Array.from(attachments.values()),
-  };
-}
-
-function dedupeCodexUserMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
-  const deduped: NormalizedMessage[] = [];
-
-  for (const message of messages) {
-    const previous = deduped[deduped.length - 1];
-    const previousImages = Array.isArray(previous?.images) ? previous.images.length : 0;
-    const currentImages = Array.isArray(message.images) ? message.images.length : 0;
-    const previousAttachments = Array.isArray(previous?.attachments) ? previous.attachments.length : 0;
-    const currentAttachments = Array.isArray(message.attachments) ? message.attachments.length : 0;
-    const previousTime = previous ? new Date(previous.timestamp).getTime() : 0;
-    const currentTime = new Date(message.timestamp).getTime();
-
-    if (
-      previous?.kind === 'text' &&
-      previous.role === 'user' &&
-      message.kind === 'text' &&
-      message.role === 'user' &&
-      previous.content === message.content &&
-      Math.abs(currentTime - previousTime) <= 5000
-    ) {
-      if (currentImages > previousImages || currentAttachments > previousAttachments) {
-        deduped[deduped.length - 1] = message;
-      }
-      continue;
-    }
-
-    deduped.push(message);
-  }
-
-  return deduped;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 async function getCodexSessionMessages(
@@ -281,36 +196,17 @@ async function getCodexSessionMessages(
         }
 
         if (entry.type === 'event_msg' && isVisibleCodexUserMessage(entry.payload as AnyRecord)) {
-          const parsedUserMessage = parseCodexAttachmentBlock(entry.payload.message);
+          const parsedContent = parseCodexAttachmentBlock(String(entry.payload.message || ''));
           messages.push({
             type: 'user',
             timestamp: entry.timestamp,
             message: {
               role: 'user',
-              content: parsedUserMessage.cleanedText,
-              attachments: parsedUserMessage.attachments,
+              content: parsedContent.cleanedText,
             },
+            images: extractCodexUserImages(entry.payload as AnyRecord),
+            attachments: parsedContent.attachments.length > 0 ? parsedContent.attachments : undefined,
           });
-        }
-
-        if (
-          entry.type === 'response_item' &&
-          entry.payload?.type === 'message' &&
-          entry.payload.role === 'user'
-        ) {
-          const userMessage = extractCodexUserContentAndImages(entry.payload.content);
-          if (userMessage.content || userMessage.images.length > 0 || userMessage.attachments.length > 0) {
-            messages.push({
-              type: 'user',
-              timestamp: entry.timestamp,
-              message: {
-                role: 'user',
-                content: userMessage.content,
-                images: userMessage.images,
-                attachments: userMessage.attachments,
-              },
-            });
-          }
         }
 
         if (
@@ -494,26 +390,21 @@ export class CodexSessionsProvider implements IProviderSessions {
     }
 
     if (raw.message?.role === 'user') {
-      const parsedContent = parseCodexAttachmentBlock(
-        typeof raw.message.content === 'string'
+      const content = typeof raw.message.content === 'string'
+        ? raw.message.content
+        : Array.isArray(raw.message.content)
           ? raw.message.content
-          : String(raw.message.content || ''),
-      );
-      const extracted = Array.isArray(raw.message.content)
-        ? extractCodexUserContentAndImages(raw.message.content)
-        : {
-            content: parsedContent.cleanedText,
-            images: Array.isArray(raw.message.images)
-              ? raw.message.images as AnyRecord[]
-              : [],
-            attachments: [
-              ...parsedContent.attachments,
-              ...(Array.isArray(raw.message.attachments)
-                ? raw.message.attachments as AnyRecord[]
-                : []),
-            ],
-          };
-      if (!extracted.content.trim() && extracted.images.length === 0 && extracted.attachments.length === 0) {
+              .map((part: string | AnyRecord) => typeof part === 'string' ? part : part?.text || '')
+              .filter(Boolean)
+              .join('\n')
+          : String(raw.message.content || '');
+      const parsedContent = parseCodexAttachmentBlock(content);
+      const rawAttachments = [
+        ...parsedContent.attachments,
+        ...(Array.isArray(raw.attachments) ? raw.attachments as AnyRecord[] : []),
+      ];
+      const rawImages = Array.isArray(raw.images) && raw.images.length > 0 ? raw.images : undefined;
+      if (!parsedContent.cleanedText.trim() && !rawImages && rawAttachments.length === 0) {
         return [];
       }
       return [createNormalizedMessage({
@@ -523,9 +414,9 @@ export class CodexSessionsProvider implements IProviderSessions {
         provider: PROVIDER,
         kind: 'text',
         role: 'user',
-        content: extracted.content,
-        images: extracted.images.length > 0 ? extracted.images : undefined,
-        attachments: extracted.attachments.length > 0 ? extracted.attachments : undefined,
+        content: parsedContent.cleanedText,
+        images: rawImages,
+        attachments: rawAttachments.length > 0 ? rawAttachments : undefined,
       })];
     }
 
@@ -771,28 +662,18 @@ export class CodexSessionsProvider implements IProviderSessions {
       }
     }
 
-    const dedupedNormalized = dedupeCodexUserMessages(normalized);
-    const totalNormalized = dedupedNormalized.length;
     let total = 0;
-    for (const msg of dedupedNormalized) {
+    for (const msg of normalized) {
       if (msg.kind !== 'tool_result') {
         total += 1;
       }
     }
     const normalizedOffset = Math.max(0, offset);
     const normalizedLimit = limit === null ? null : Math.max(0, limit);
-    const messages = normalizedLimit === null
-      ? dedupedNormalized
-      : dedupedNormalized.slice(
-          Math.max(0, totalNormalized - normalizedOffset - normalizedLimit),
-          Math.max(0, totalNormalized - normalizedOffset),
-        );
-    const hasMore = normalizedLimit === null
-      ? false
-      : Math.max(0, totalNormalized - normalizedOffset - normalizedLimit) > 0;
+    const { page, hasMore } = sliceTailPage(normalized, normalizedLimit, normalizedOffset);
 
     return {
-      messages,
+      messages: page,
       total,
       hasMore,
       offset: normalizedOffset,

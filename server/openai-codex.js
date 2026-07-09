@@ -14,15 +14,14 @@
  */
 
 import { Codex } from '@openai/codex-sdk';
-import { promises as fs } from 'fs';
-import path from 'path';
+
+import { buildCodexInputItems, normalizeImageDescriptors } from './shared/image-attachments.js';
 import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
 import { sessionsService } from './modules/providers/services/sessions.service.js';
 import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
 import { providerModelsService } from './modules/providers/services/provider-models.service.js';
-import { createNormalizedMessage } from './shared/utils.js';
+import { createCompleteMessage, createNormalizedMessage } from './shared/utils.js';
 
-// Track active sessions
 const activeCodexSessions = new Map();
 
 function readUsageNumber(value) {
@@ -217,11 +216,6 @@ function mapPermissionModeToCodexOptions(permissionMode) {
   }
 }
 
-function getImageExtension(mimeType) {
-  const rawExtension = mimeType?.split('/')[1] || 'png';
-  return rawExtension.split('+')[0] || 'png';
-}
-
 function normalizeCodexAttachmentRecord(attachment) {
   if (!attachment || typeof attachment !== 'object') {
     return null;
@@ -234,7 +228,7 @@ function normalizeCodexAttachmentRecord(attachment) {
 
   const attachmentName = typeof attachment.name === 'string' && attachment.name.trim()
     ? attachment.name.trim()
-    : path.basename(attachmentPath);
+    : attachmentPath.split(/[\\/]/).pop() || attachmentPath;
   const normalized = {
     name: attachmentName,
     path: attachmentPath,
@@ -269,83 +263,6 @@ function appendCodexAttachments(command, attachments) {
   return `${command}\n\n<cloudcli-file-attachments>\n${attachmentBlock}\n</cloudcli-file-attachments>`;
 }
 
-async function buildCodexInput(command, images, attachments, cwd) {
-  const tempImagePaths = [];
-  let tempDir = null;
-  const commandWithAttachments = appendCodexAttachments(command, attachments);
-
-  if (!images || images.length === 0) {
-    return {
-      input: commandWithAttachments,
-      tempImagePaths,
-      tempDir
-    };
-  }
-
-  try {
-    const workingDir = cwd || process.cwd();
-    tempDir = path.join(workingDir, '.tmp', 'images', Date.now().toString());
-    await fs.mkdir(tempDir, { recursive: true });
-
-    for (const [index, image] of images.entries()) {
-      const matches = image?.data?.match(/^data:([^;]+);base64,(.+)$/);
-      if (!matches) {
-        continue;
-      }
-
-      const [, mimeType, base64Data] = matches;
-      const extension = getImageExtension(mimeType);
-      const filename = `image_${index}.${extension}`;
-      const filepath = path.join(tempDir, filename);
-
-      await fs.writeFile(filepath, Buffer.from(base64Data, 'base64'));
-      tempImagePaths.push(filepath);
-    }
-  } catch (error) {
-    console.error('[Codex] Error processing images:', error);
-    return {
-      input: commandWithAttachments,
-      tempImagePaths,
-      tempDir
-    };
-  }
-
-  if (tempImagePaths.length === 0) {
-    return {
-      input: commandWithAttachments,
-      tempImagePaths,
-      tempDir
-    };
-  }
-
-  return {
-    input: [
-      { type: 'text', text: commandWithAttachments },
-      ...tempImagePaths.map((imagePath) => ({ type: 'local_image', path: imagePath }))
-    ],
-    tempImagePaths,
-    tempDir
-  };
-}
-
-async function cleanupTempFiles(tempImagePaths, tempDir) {
-  if (!tempImagePaths || tempImagePaths.length === 0) {
-    return;
-  }
-
-  for (const imagePath of tempImagePaths) {
-    await fs.unlink(imagePath).catch((error) => {
-      console.error(`[Codex] Failed to delete temp image ${imagePath}:`, error);
-    });
-  }
-
-  if (tempDir) {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch((error) => {
-      console.error(`[Codex] Failed to delete temp directory ${tempDir}:`, error);
-    });
-  }
-}
-
 /**
  * Execute a Codex query with streaming
  * @param {string} command - The prompt to send
@@ -359,6 +276,9 @@ export async function queryCodex(command, options = {}, ws) {
     cwd,
     projectPath,
     model,
+    effort,
+    images,
+    attachments,
     permissionMode = 'default'
   } = options;
 
@@ -370,30 +290,32 @@ export async function queryCodex(command, options = {}, ws) {
 
   const workingDirectory = cwd || projectPath || process.cwd();
   const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
+  const catalog = (await providerModelsService.getProviderModels('codex')).models;
+  const selectedModel = catalog.OPTIONS.find((option) => option.value === resolvedModel) || null;
+  const allowedEfforts = selectedModel?.effort?.values?.map((value) => value.value) || [];
+  const resolvedEffort = typeof effort === 'string' && effort !== 'default' && allowedEfforts.includes(effort)
+    ? effort
+    : undefined;
 
   let codex;
   let thread;
   let capturedSessionId = sessionId;
   let sessionCreatedSent = false;
   let terminalFailure = null;
-  let tempImagePaths = [];
-  let tempDir = null;
   const abortController = new AbortController();
 
   try {
-    // Initialize Codex SDK
     codex = new Codex();
 
-    // Thread options with sandbox and approval settings
     const threadOptions = {
       workingDirectory,
       skipGitRepoCheck: true,
       sandboxMode,
       approvalPolicy,
-      model: resolvedModel
+      model: resolvedModel,
+      modelReasoningEffort: resolvedEffort,
     };
 
-    // Start or resume thread
     if (sessionId) {
       thread = codex.resumeThread(sessionId, threadOptions);
     } else {
@@ -413,23 +335,17 @@ export async function queryCodex(command, options = {}, ws) {
       });
     };
 
-    // Existing sessions can be tracked immediately; new sessions are tracked after thread.started.
     if (capturedSessionId) {
       registerSession(capturedSessionId);
     }
 
-    const imageInput = await buildCodexInput(
-      command,
-      options.images,
-      options.attachments,
-      workingDirectory,
-    );
-    const input = imageInput.input;
-    tempImagePaths = imageInput.tempImagePaths;
-    tempDir = imageInput.tempDir;
-
-    // Execute with streaming
-    const streamedTurn = await thread.runStreamed(input, {
+    // Execute with streaming. Turns with image attachments send structured
+    // input items so Codex reads the images from their local asset paths.
+    const commandWithAttachments = appendCodexAttachments(command, attachments);
+    const turnInput = normalizeImageDescriptors(images).length > 0
+      ? buildCodexInputItems(commandWithAttachments, images, workingDirectory)
+      : commandWithAttachments;
+    const streamedTurn = await thread.runStreamed(turnInput, {
       signal: abortController.signal
     });
 
@@ -495,21 +411,26 @@ export async function queryCodex(command, options = {}, ws) {
       }
     }
 
-    // Send completion event
-    if (!terminalFailure) {
-      sendMessage(ws, createNormalizedMessage({
-        kind: 'complete',
-        actualSessionId: capturedSessionId || thread.id || sessionId || null,
-        sessionId: capturedSessionId || sessionId || null,
-        provider: 'codex'
-      }));
-      notifyRunStopped({
-        userId: ws?.userId || null,
+    // Send the terminal completion event — skipped for aborted runs, whose
+    // terminal `complete` (aborted: true) was already sent by abort-session.
+    const runSession = capturedSessionId ? activeCodexSessions.get(capturedSessionId) : null;
+    const runAborted = runSession?.status === 'aborted' || abortController.signal.aborted;
+    if (!runAborted) {
+      sendMessage(ws, createCompleteMessage({
         provider: 'codex',
         sessionId: capturedSessionId || sessionId || null,
-        sessionName: sessionSummary,
-        stopReason: 'completed'
-      });
+        actualSessionId: capturedSessionId || thread.id || sessionId || null,
+        exitCode: terminalFailure ? 1 : 0,
+      }));
+      if (!terminalFailure) {
+        notifyRunStopped({
+          userId: ws?.userId || null,
+          provider: 'codex',
+          sessionId: capturedSessionId || sessionId || null,
+          sessionName: sessionSummary,
+          stopReason: 'completed'
+        });
+      }
     }
 
   } catch (error) {
@@ -529,6 +450,11 @@ export async function queryCodex(command, options = {}, ws) {
         : error.message;
 
       sendMessage(ws, createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'codex' }));
+      sendMessage(ws, createCompleteMessage({
+        provider: 'codex',
+        sessionId: capturedSessionId || sessionId || null,
+        exitCode: 1,
+      }));
       if (!terminalFailure) {
         notifyRunFailed({
           userId: ws?.userId || null,
@@ -541,8 +467,6 @@ export async function queryCodex(command, options = {}, ws) {
     }
 
   } finally {
-    await cleanupTempFiles(tempImagePaths, tempDir);
-
     // Update session status
     if (capturedSessionId) {
       const session = activeCodexSessions.get(capturedSessionId);
