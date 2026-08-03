@@ -87,6 +87,7 @@ try {
   $env:ELECTRON_SKIP_BINARY_DOWNLOAD = '1'
   Invoke-Checked $npmCommand install --no-audit --no-fund
   Invoke-Checked $npmCommand run build
+  $env:npm_config_prefix = Join-Path $env:APPDATA 'npm'
   Invoke-Checked $npmCommand link
 
   Start-CloudCli
