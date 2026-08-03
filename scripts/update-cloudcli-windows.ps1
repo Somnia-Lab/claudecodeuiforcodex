@@ -84,7 +84,8 @@ try {
 
   Invoke-Checked git fetch origin --prune
   Invoke-Checked git merge --ff-only "origin/$Branch"
-  Invoke-Checked $npmCommand install
+  $env:ELECTRON_SKIP_BINARY_DOWNLOAD = '1'
+  Invoke-Checked $npmCommand install --no-audit --no-fund
   Invoke-Checked $npmCommand run build
   Invoke-Checked $npmCommand link
 
