@@ -6,6 +6,9 @@ $codexCliPath = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe
 $logDir = Join-Path $env:LOCALAPPDATA 'CloudCLI'
 $stdoutLog = Join-Path $logDir 'autostart.out.log'
 $stderrLog = Join-Path $logDir 'autostart.err.log'
+$defaultNodeHome = Join-Path $env:LOCALAPPDATA 'Programs\nodejs-lts'
+$nodeHome = if ($env:CLOUDCLI_NODE_HOME) { $env:CLOUDCLI_NODE_HOME } else { $defaultNodeHome }
+$portableNode = Join-Path $nodeHome 'node.exe'
 
 if (-not (Test-Path -LiteralPath $cloudcliCmd)) {
   throw "cloudcli.cmd not found at $cloudcliCmd"
@@ -26,7 +29,9 @@ if ($existingListener) {
 if (Test-Path -LiteralPath $codexCliPath) {
   $env:CODEX_CLI_PATH = $codexCliPath
 }
+$nodePath = if (Test-Path -LiteralPath $portableNode) { "$nodeHome;" } else { '' }
 $env:PATH = "$($env:APPDATA)\npm;$env:PATH"
+$env:PATH = "$nodePath$env:PATH"
 
 Start-Process `
   -FilePath $cloudcliCmd `

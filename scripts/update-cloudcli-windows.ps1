@@ -10,7 +10,17 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $databasePath = Join-Path $env:USERPROFILE '.cloudcli\auth.db'
 $backupRoot = Join-Path $env:USERPROFILE '.cloudcli\backups'
-$npmCommand = (Get-Command npm.cmd -ErrorAction Stop).Source
+$defaultNodeHome = Join-Path $env:LOCALAPPDATA 'Programs\nodejs-lts'
+$nodeHome = if ($env:CLOUDCLI_NODE_HOME) { $env:CLOUDCLI_NODE_HOME } else { $defaultNodeHome }
+$portableNode = Join-Path $nodeHome 'node.exe'
+$portableNpm = Join-Path $nodeHome 'npm.cmd'
+
+if ((Test-Path -LiteralPath $portableNode) -and (Test-Path -LiteralPath $portableNpm)) {
+  $env:PATH = "$nodeHome;$env:PATH"
+  $npmCommand = $portableNpm
+} else {
+  $npmCommand = (Get-Command npm.cmd -ErrorAction Stop).Source
+}
 
 function Invoke-Checked {
   param(
@@ -39,6 +49,12 @@ function Start-CloudCli {
 }
 
 Set-Location $projectRoot
+
+$nodeVersion = & node.exe --version
+if ($LASTEXITCODE -ne 0) {
+  throw 'Unable to run Node.js.'
+}
+Write-Host "Using Node.js $nodeVersion from $((Get-Command node.exe -ErrorAction Stop).Source)"
 
 $dirtyFiles = @(git status --porcelain --untracked-files=all)
 if ($LASTEXITCODE -ne 0) {
