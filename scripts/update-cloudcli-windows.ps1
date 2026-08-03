@@ -58,6 +58,9 @@ function Install-UpdateCommand {
   )
 
   New-Item -ItemType Directory -Path $npmBinDir -Force | Out-Null
+  if (Test-Path -LiteralPath $portableNode) {
+    Copy-Item -LiteralPath $portableNode -Destination (Join-Path $npmBinDir 'node.exe') -Force
+  }
   [System.IO.File]::WriteAllLines(
     $commandPath,
     $commandLines,
