@@ -48,6 +48,23 @@ function Start-CloudCli {
   Start-ScheduledTask -TaskName $TaskName
 }
 
+function Install-UpdateCommand {
+  $npmBinDir = Join-Path $env:APPDATA 'npm'
+  $commandPath = Join-Path $npmBinDir 'cloudcli-update.cmd'
+  $updateScriptPath = (Join-Path $projectRoot 'scripts\update-cloudcli-windows.ps1').Replace('%', '%%')
+  $commandLines = @(
+    '@echo off'
+    "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$updateScriptPath`" %*"
+  )
+
+  New-Item -ItemType Directory -Path $npmBinDir -Force | Out-Null
+  [System.IO.File]::WriteAllLines(
+    $commandPath,
+    $commandLines,
+    [System.Text.UTF8Encoding]::new($false)
+  )
+}
+
 Set-Location $projectRoot
 
 $nodeVersion = & node.exe --version
@@ -89,6 +106,7 @@ try {
   Invoke-Checked $npmCommand run build
   $env:npm_config_prefix = Join-Path $env:APPDATA 'npm'
   Invoke-Checked $npmCommand link
+  Install-UpdateCommand
 
   Start-CloudCli
   $serviceStopped = $false
