@@ -66,6 +66,27 @@ function readNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+function quotePowerShellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function getWindowsCodexCommand(): string {
+  const configuredPath = process.env.CODEX_CLI_PATH?.trim();
+  if (configuredPath && fs.existsSync(configuredPath)) {
+    return quotePowerShellString(configuredPath);
+  }
+
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    const installedPath = path.join(localAppData, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe');
+    if (fs.existsSync(installedPath)) {
+      return quotePowerShellString(installedPath);
+    }
+  }
+
+  return 'codex';
+}
+
 /**
  * Parses incoming websocket shell messages and keeps processing safe when
  * malformed payloads are received.
@@ -139,11 +160,12 @@ function buildShellCommand(
   if (provider === 'codex') {
     if (resumeSessionId) {
       if (os.platform() === 'win32') {
-        return `codex resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { codex }`;
+        const codexCommand = getWindowsCodexCommand();
+        return `& ${codexCommand} resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { & ${codexCommand} }`;
       }
       return `codex resume "${resumeSessionId}" || codex`;
     }
-    return 'codex';
+    return os.platform() === 'win32' ? `& ${getWindowsCodexCommand()}` : 'codex';
   }
 
   if (provider === 'opencode') {
